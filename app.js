@@ -142,6 +142,7 @@ function calculatePromilles() {
     dbGetAll('drinks_log').then(logs => {
         if (logs.length === 0) {
             updateUI(0, null, 0, 0);
+            if (statsOpen) renderStatistics();
             return;
         }
 
@@ -154,6 +155,7 @@ function calculatePromilles() {
         // 24 tunnin nollaussääntö viimeisestä juomasta
         if ((now - lastDrinkTime) / (1000 * 60 * 60) >= 24) {
             updateUI(0, null, 0, 0);
+            if (statsOpen) renderStatistics();
             return;
         }
 
@@ -206,6 +208,7 @@ function calculatePromilles() {
         }
 
         updateUI(currentPromilles, zeroTime, sessionDrinks.length, totalSessionGrams);
+        if (statsOpen) renderStatistics();
     });
 }
 
@@ -242,6 +245,36 @@ function updateUI(promilles, zeroTime, count, grams) {
     document.getElementById('session-grams').textContent = grams.toFixed(1);
 }
 
+// --- KELLONAJAN VALINTA ---
+let customTimeOpen = false;
+
+// Paikallinen aika muodossa YYYY-MM-DDTHH:MM (datetime-local -kenttää varten)
+function localDateTimeValue(date) {
+    const offset = date.getTimezoneOffset() * 60000;
+    return new Date(date - offset).toISOString().slice(0, 16);
+}
+
+document.getElementById('btn-time-toggle').onclick = function() {
+    customTimeOpen = !customTimeOpen;
+    const row    = document.getElementById('time-input-row');
+    const label  = document.getElementById('time-toggle-label');
+    const icon   = document.getElementById('time-toggle-icon');
+    const input  = document.getElementById('input-custom-time');
+
+    if (customTimeOpen) {
+        // Aseta oletukseksi nykyinen aika
+        if (!input.value) input.value = localDateTimeValue(new Date());
+        row.classList.remove('hidden');
+        label.textContent = 'Peruuta — käytä nykyistä aikaa';
+        icon.textContent  = '✕';
+    } else {
+        row.classList.add('hidden');
+        input.value       = '';
+        label.textContent = 'Unohditko merkitä? Aseta kellonaika';
+        icon.textContent  = '⏱';
+    }
+};
+
 // --- TALLENNUS ---
 document.getElementById('btn-save').onclick = async function() {
     const abv    = parseFloat(selectAbv.value);
@@ -251,11 +284,17 @@ document.getElementById('btn-save').onclick = async function() {
 
     if (!volume || volume <= 0) return alert("Syötä määrä!");
 
+    // Kellonaika: käyttäjän syöttämä tai nykyinen
+    const customTimeVal = document.getElementById('input-custom-time').value;
+    const timestamp = customTimeVal
+        ? new Date(customTimeVal).toISOString()
+        : new Date().toISOString();
+
     // Alkoholin grammamäärä: tilavuus (ml) × prosentti × etanolin tiheys (0,789 g/ml)
     const alcoholGrams = volume * (abv / 100) * 0.789;
 
     const drinkRecord = {
-        timestamp:     new Date().toISOString(),
+        timestamp,
         drink_type:    activeType,
         abv:           abv,
         volume_ml:     volume,
@@ -268,6 +307,11 @@ document.getElementById('btn-save').onclick = async function() {
     // Profiili ja viimeisin syöte — ei tarvitse odottaa
     dbWrite('settings', { key: 'user_profile', weight, gender });
     dbWrite('settings', { key: 'last_input', drink_type: activeType, abv, volume_ml: volume });
+
+    // Nollataan kellonaikovalinta tallennuksen jälkeen
+    if (customTimeOpen) {
+        document.getElementById('btn-time-toggle').click();
+    }
 
     calculatePromilles();
 };
@@ -301,6 +345,96 @@ function saveProfile() {
     const gender = document.getElementById('select-gender').value;
     dbWrite('settings', { key: 'user_profile', weight, gender });
     calculatePromilles();
+}
+
+// --- TILASTO (viimeiset 24 h) ---
+let statsOpen = false;
+
+document.getElementById('btn-stats-toggle').onclick = function() {
+    statsOpen = !statsOpen;
+    const content = document.getElementById('stats-content');
+    const arrow   = document.getElementById('stats-arrow');
+    if (statsOpen) {
+        content.classList.remove('hidden');
+        arrow.style.transform = 'rotate(90deg)';
+        renderStatistics();
+    } else {
+        content.classList.add('hidden');
+        arrow.style.transform = 'rotate(0deg)';
+    }
+};
+
+async function renderStatistics() {
+    const statsList = document.getElementById('stats-list');
+    statsList.innerHTML = '<p class="text-slate-500 text-sm text-center py-2">Ladataan...</p>';
+
+    const now    = new Date();
+    const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    const logs   = await dbGetAll('drinks_log');
+    const recent = logs.filter(d => new Date(d.timestamp) >= cutoff);
+
+    if (recent.length === 0) {
+        statsList.innerHTML = '<p class="text-slate-500 text-sm text-center py-3">Ei juomia viimeisen 24 tunnin aikana.</p>';
+        return;
+    }
+
+    // Haetaan juomalajien nimet (oletuslajit + omat)
+    const customTypes = await dbGetAll('drink_types');
+    const allTypes    = [...defaultTypes, ...customTypes];
+    const typeMap     = {};
+    allTypes.forEach(t => typeMap[t.id] = t.label);
+
+    // Ryhmitellään lajin ja alkoholiprosentin mukaan
+    const groups = {};
+    recent.forEach(d => {
+        const key = `${d.drink_type}__${d.abv}`;
+        if (!groups[key]) {
+            groups[key] = {
+                label:    typeMap[d.drink_type] || d.drink_type,
+                abv:      d.abv,
+                total_ml: 0,
+                count:    0
+            };
+        }
+        groups[key].total_ml += d.volume_ml;
+        groups[key].count++;
+    });
+
+    // Järjestys: laji aakkosjärjestyksessä, sitten ABV nousevasti
+    const sorted = Object.values(groups).sort((a, b) =>
+        a.label.localeCompare(b.label, 'fi') || a.abv - b.abv
+    );
+
+    let html = '<div class="space-y-2 mt-1">';
+    sorted.forEach(g => {
+        const cl = (g.total_ml / 10).toFixed(1);
+        html += `
+        <div class="flex justify-between items-center bg-slate-900/60 rounded-lg px-3 py-2.5">
+            <div>
+                <span class="font-semibold text-slate-200">${g.label}</span>
+                <span class="text-slate-400 text-xs ml-2">${parseFloat(g.abv).toFixed(1)} %</span>
+            </div>
+            <div class="text-right">
+                <span class="font-bold text-amber-400">${cl} cl</span>
+                <span class="text-slate-500 text-xs ml-1">(${g.count} kpl)</span>
+            </div>
+        </div>`;
+    });
+
+    // Yhteenveto
+    const totalCl    = (recent.reduce((s, d) => s + d.volume_ml, 0) / 10).toFixed(1);
+    const totalGrams = recent.reduce((s, d) => s + d.alcohol_grams, 0).toFixed(1);
+    const totalCount = recent.length;
+
+    html += `
+    <div class="border-t border-slate-700 mt-3 pt-3 flex justify-between items-center">
+        <span class="text-slate-400 text-xs uppercase tracking-wide">Yhteensä ${totalCount} kpl</span>
+        <span class="text-amber-400 font-bold">${totalCl} cl &middot; ${totalGrams} g</span>
+    </div>`;
+
+    html += '</div>';
+    statsList.innerHTML = html;
 }
 
 // --- SOVELLUKSEN KÄYNNISTYS ---

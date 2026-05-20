@@ -63,7 +63,29 @@
             <button type="button" id="btn-save" class="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-lg py-4 rounded-xl shadow-lg transition-transform active:scale-95 uppercase tracking-wider mt-4">
                 Tallenna juoma
             </button>
+
+            <div class="pt-1">
+                <button type="button" id="btn-time-toggle" class="flex items-center gap-1.5 text-xs text-slate-500 hover:text-amber-400 active:text-amber-400 transition-colors py-1">
+                    <span id="time-toggle-icon" class="text-base leading-none">⏱</span>
+                    <span id="time-toggle-label">Unohditko merkitä? Aseta kellonaika</span>
+                </button>
+                <div id="time-input-row" class="hidden mt-2 space-y-1">
+                    <input type="datetime-local" id="input-custom-time"
+                        class="w-full bg-slate-900 border border-amber-700/60 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-amber-500 text-slate-200">
+                    <p class="text-xs text-slate-500 pl-1">Tyhjennä kenttä → käytetään nykyistä aikaa</p>
+                </div>
+            </div>
         </main>
+
+        <section class="bg-slate-800/80 rounded-2xl shadow-xl border border-slate-700 mt-6 overflow-hidden">
+            <button id="btn-stats-toggle" class="w-full flex justify-between items-center px-6 py-4 text-left active:bg-slate-700/50 transition-colors">
+                <h2 class="text-base font-bold text-slate-300">📊 Tilasto — viimeiset 24 h</h2>
+                <span id="stats-arrow" class="text-slate-400 text-lg leading-none transition-transform duration-200">▶</span>
+            </button>
+            <div id="stats-content" class="hidden px-6 pb-5">
+                <div id="stats-list" class="text-sm text-slate-500 text-center py-2">Ladataan...</div>
+            </div>
+        </section>
 
         <section class="bg-slate-800/80 p-6 rounded-2xl shadow-xl border border-slate-700 mt-6 space-y-4">
             <h2 class="text-base font-bold text-slate-300 border-b border-slate-700 pb-2">Käyttäjätiedot (Laskentaa varten)</h2>
