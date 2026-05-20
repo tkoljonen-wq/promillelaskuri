@@ -248,32 +248,40 @@ function updateUI(promilles, zeroTime, count, grams) {
 // --- KELLONAJAN VALINTA ---
 let customTimeOpen = false;
 
-// Paikallinen aika muodossa YYYY-MM-DDTHH:MM (datetime-local -kenttää varten)
-function localDateTimeValue(date) {
-    const offset = date.getTimezoneOffset() * 60000;
-    return new Date(date - offset).toISOString().slice(0, 16);
+function updateTimeResultLabel() {
+    const mins    = parseInt(document.getElementById('select-time-ago').value, 10);
+    const result  = new Date(Date.now() - mins * 60000);
+    const timeStr = result.toLocaleTimeString('fi-FI', { hour: '2-digit', minute: '2-digit' });
+
+    // Näytetään "eilen" jos päivä on vaihtunut
+    const today     = new Date();
+    const isYesterday = result.getDate() !== today.getDate()
+                     || result.getMonth() !== today.getMonth()
+                     || result.getFullYear() !== today.getFullYear();
+    const dayLabel  = isYesterday ? ' (eilen)' : '';
+
+    document.getElementById('time-result-label').textContent = `→ klo ${timeStr}${dayLabel}`;
 }
 
 document.getElementById('btn-time-toggle').onclick = function() {
     customTimeOpen = !customTimeOpen;
-    const row    = document.getElementById('time-input-row');
-    const label  = document.getElementById('time-toggle-label');
-    const icon   = document.getElementById('time-toggle-icon');
-    const input  = document.getElementById('input-custom-time');
+    const row   = document.getElementById('time-input-row');
+    const label = document.getElementById('time-toggle-label');
+    const icon  = document.getElementById('time-toggle-icon');
 
     if (customTimeOpen) {
-        // Aseta oletukseksi nykyinen aika
-        if (!input.value) input.value = localDateTimeValue(new Date());
         row.classList.remove('hidden');
         label.textContent = 'Peruuta — käytä nykyistä aikaa';
         icon.textContent  = '✕';
+        updateTimeResultLabel();
     } else {
         row.classList.add('hidden');
-        input.value       = '';
         label.textContent = 'Unohditko merkitä? Aseta kellonaika';
         icon.textContent  = '⏱';
     }
 };
+
+document.getElementById('select-time-ago').onchange = updateTimeResultLabel;
 
 // --- TALLENNUS ---
 document.getElementById('btn-save').onclick = async function() {
@@ -284,10 +292,9 @@ document.getElementById('btn-save').onclick = async function() {
 
     if (!volume || volume <= 0) return alert("Syötä määrä!");
 
-    // Kellonaika: käyttäjän syöttämä tai nykyinen
-    const customTimeVal = document.getElementById('input-custom-time').value;
-    const timestamp = customTimeVal
-        ? new Date(customTimeVal).toISOString()
+    // Kellonaika: pudotusvalikosta laskettu tai nykyinen hetki
+    const timestamp = customTimeOpen
+        ? new Date(Date.now() - parseInt(document.getElementById('select-time-ago').value, 10) * 60000).toISOString()
         : new Date().toISOString();
 
     // Alkoholin grammamäärä: tilavuus (ml) × prosentti × etanolin tiheys (0,789 g/ml)
