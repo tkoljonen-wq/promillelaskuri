@@ -42,6 +42,29 @@ const defaultTypes = [
 
 let activeType = 'beer';
 
+// Oletusalkoholiprosentit sisäänrakennetuille juomalajeille
+const defaultTypeAbvs = {
+    beer:      '4.5',
+    cider:     '4.5',
+    longdrink: '5.5',
+    wine:      '13.0',
+    strong:    '38.0'
+};
+
+// Juomalajikohtaiset viimeksi käytetyt alkoholiprosentit (ladataan DB:stä)
+let typeAbvs = {};
+
+// Palauttaa juomalajin tallennetun tai oletus-ABV:n
+function getTypeAbv(typeId) {
+    return typeAbvs[typeId] || defaultTypeAbvs[typeId] || '4.5';
+}
+
+// Tallentaa juomalajin käytetyn ABV:n muistiin
+async function setTypeAbv(typeId, abv) {
+    typeAbvs[typeId] = abv;
+    await dbWrite('settings', { key: 'drink_type_abvs', abvs: typeAbvs });
+}
+
 // Geneeriset DB-operaatiot — kaikki palauttavat Promisen
 function dbWrite(storeName, data) {
     return new Promise((resolve, reject) => {
@@ -74,6 +97,15 @@ function dbClearStore(storeName) {
     return new Promise((resolve, reject) => {
         const tx = db.transaction(storeName, 'readwrite');
         const req = tx.objectStore(storeName).clear();
+        req.onsuccess = () => resolve();
+        req.onerror  = () => reject(req.error);
+    });
+}
+
+function dbDelete(storeName, key) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        const req = tx.objectStore(storeName).delete(key);
         req.onsuccess = () => resolve();
         req.onerror  = () => reject(req.error);
     });
@@ -138,20 +170,54 @@ async function renderDrinkTypes() {
     container.innerHTML = '';
 
     allTypes.forEach(t => {
+        const isCustom = t.id.startsWith('custom_');
+        const isActive = activeType === t.id;
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = `flex-1 min-w-[28%] text-sm font-medium py-3 px-2 rounded-xl border transition-all duration-200 ${
-            activeType === t.id
-            ? 'bg-amber-500 text-slate-950 border-amber-500 font-bold shadow-lg scale-105'
-            : 'bg-slate-850 text-slate-300 border-slate-700 hover:bg-slate-750'
-        }`;
-        btn.textContent = t.label;
+        btn.className = [
+            'flex-1 min-w-[28%] text-sm font-medium py-3 rounded-xl border transition-all duration-200',
+            isActive
+                ? 'bg-amber-500 text-slate-950 border-amber-500 font-bold shadow-lg scale-105'
+                : 'bg-slate-850 text-slate-300 border-slate-700 hover:bg-slate-750',
+            isCustom ? 'flex items-center pl-3 pr-2' : 'px-2'
+        ].join(' ');
+
+        if (isCustom) {
+            const labelSpan = document.createElement('span');
+            labelSpan.className = 'flex-1 text-center';
+            labelSpan.textContent = t.label;
+            btn.appendChild(labelSpan);
+
+            const delSpan = document.createElement('span');
+            delSpan.textContent = '✕';
+            delSpan.className = `text-xs ml-1 flex-shrink-0 ${isActive ? 'text-slate-700/70' : 'text-red-400/60'}`;
+            delSpan.onclick = (e) => {
+                e.stopPropagation();
+                deleteCustomType(t.id);
+            };
+            btn.appendChild(delSpan);
+        } else {
+            btn.textContent = t.label;
+        }
+
         btn.onclick = () => {
             activeType = t.id;
+            selectAbv.value = getTypeAbv(t.id);
             renderDrinkTypes();
         };
         container.appendChild(btn);
     });
+}
+
+// Poistaa oman juomalajin
+async function deleteCustomType(typeId) {
+    if (!confirm('Poistetaanko juomalaji?')) return;
+    await dbDelete('drink_types', typeId);
+    if (activeType === typeId) {
+        activeType = 'beer';
+    }
+    selectAbv.value = getTypeAbv(activeType);
+    renderDrinkTypes();
 }
 
 // --- LASKENTALOGIIKKA (WATSON-WIDMARK + 30 MIN IMEYTYMISAIKA) ---
@@ -356,6 +422,9 @@ document.getElementById('btn-save').onclick = async function() {
     // Odotetaan juoman tallentuminen ennen laskentaa (race condition -korjaus)
     await dbWrite('drinks_log', drinkRecord);
 
+    // Tallennetaan tämän juomalajin käytetty alkoholiprosentti muistiin
+    await setTypeAbv(activeType, abv.toFixed(1));
+
     // Profiili ja viimeisin syöte — ei tarvitse odottaa
     dbWrite('settings', { key: 'user_profile', weight, height, age, gender });
     dbWrite('settings', { key: 'last_input', drink_type: activeType, abv, volume_ml: volume });
@@ -382,6 +451,9 @@ document.getElementById('btn-add-custom').onclick = function() {
     if (!name) return;
 
     const id = 'custom_' + Date.now();
+    // Peritään nykyinen valittu prosentti uudelle juomalajille oletukseksi
+    typeAbvs[id] = selectAbv.value;
+    dbWrite('settings', { key: 'drink_type_abvs', abvs: typeAbvs });
     dbWrite('drink_types', { id, label: name });
     activeType = id;
     input.value = '';
@@ -709,13 +781,21 @@ initDB().then(async () => {
         document.getElementById('select-gender').value = profile.gender;
     }
 
+    // Ladataan juomalajikohtaiset alkoholiprosentit
+    const typeAbvsRecord = await dbGet('settings', 'drink_type_abvs');
+    if (typeAbvsRecord) {
+        typeAbvs = typeAbvsRecord.abvs || {};
+    }
+
     // Ladataan viimeisin syöte oletuksiksi
     const lastInput = await dbGet('settings', 'last_input');
     if (lastInput) {
         activeType = lastInput.drink_type;
-        selectAbv.value = lastInput.abv.toFixed(1);
         document.getElementById('input-volume').value = lastInput.volume_ml;
     }
+
+    // Asetetaan aktiivisen juomalajin tallennettu tai oletus-ABV
+    selectAbv.value = getTypeAbv(activeType);
 
     renderDrinkTypes();
     calculatePromilles();
