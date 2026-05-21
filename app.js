@@ -79,6 +79,28 @@ function dbClearStore(storeName) {
     });
 }
 
+// --- KEHON JAKAUTUMISTILAVUUDEN LASKENTA (Watson-kaava 1980) ---
+
+// Palauttaa kehon kokonaisvesimäärän (TBW) litroissa.
+// Lähde: Watson PE ym., Am J Clin Nutr 1980;33:27–39.
+// Huom: naisilla ikä ei sisälly Watsonin alkuperäiseen kaavaan.
+function calculateTBW(weightKg, heightCm, age, gender) {
+    if (gender === 'male') {
+        return 2.447 - 0.09516 * age + 0.1074 * heightCm + 0.3362 * weightKg;
+    } else {
+        return -2.097 + 0.1069 * heightCm + 0.2466 * weightKg;
+    }
+}
+
+// Alkoholin jakautumistilavuus (L) = TBW / veri-vesi-jakautumiskerroin (0.85).
+// Korvaa Widmarkin weight*r -lausekkeen: ylipainoisella TBW kasvaa selvästi
+// hitaammin kuin kokonaispaino, joten promillearvio on oikeampi.
+function calculateDistributionVolume(weightKg, heightCm, age, gender) {
+    const tbw = calculateTBW(weightKg, heightCm, age, gender);
+    // Turvaraja äärimmäisille syötteille: vähintään 30 % painosta
+    return Math.max(tbw / 0.85, weightKg * 0.30);
+}
+
 // --- ABV-VALIKKO ---
 // 4.0–14.0 % välein 0.5 % (oluet, siiderit, viinit)
 // 15–22 %   välein 1 %   (väkevöidyt viinit, portviini)
@@ -132,17 +154,20 @@ async function renderDrinkTypes() {
     });
 }
 
-// --- LASKENTALOGIIKKA (WIDMARK + 30 MIN IMEYTYMISAIKA) ---
+// --- LASKENTALOGIIKKA (WATSON-WIDMARK + 30 MIN IMEYTYMISAIKA) ---
 function calculatePromilles() {
     const weight = parseFloat(document.getElementById('input-weight').value) || 80;
+    const height = parseFloat(document.getElementById('input-height').value) || 178;
+    const age    = parseInt(document.getElementById('input-age').value, 10) || 35;
     const gender = document.getElementById('select-gender').value;
-    const r = gender === 'male' ? 0.68 : 0.55; // Kehon nestekerroin
-    const burnRatePerHour = 0.15;               // Promilleä/tunti, Widmark-vakio
+    const burnRatePerHour = 0.15; // Promilleä/tunti, Widmark-vakio
+
+    const distributionVolume = calculateDistributionVolume(weight, height, age, gender);
 
     dbGetAll('drinks_log').then(logs => {
         if (logs.length === 0) {
             updateUI(0, null, 0, 0);
-            renderBacChart([], weight, r, burnRatePerHour, 0);
+            renderBacChart([], distributionVolume, burnRatePerHour, 0);
             if (statsOpen) renderStatistics();
             return;
         }
@@ -156,7 +181,7 @@ function calculatePromilles() {
         // 24 tunnin nollaussääntö viimeisestä juomasta
         if ((now - lastDrinkTime) / (1000 * 60 * 60) >= 24) {
             updateUI(0, null, 0, 0);
-            renderBacChart([], weight, r, burnRatePerHour, 0);
+            renderBacChart([], distributionVolume, burnRatePerHour, 0);
             if (statsOpen) renderStatistics();
             return;
         }
@@ -194,8 +219,8 @@ function calculatePromilles() {
             }
         });
 
-        // Widmark-kaava: C = A / (r * W)
-        let theoreticalPromilles = totalAbsorbedGrams / (weight * r);
+        // Watson-Widmark: C = A / V_d, missä V_d = TBW / 0.85
+        let theoreticalPromilles = totalAbsorbedGrams / distributionVolume;
 
         // Vähennetään palaminen ensimmäisestä juomasta lähtien
         const totalElapsedHours = (now - firstDrinkTime) / (1000 * 60 * 60);
@@ -217,7 +242,7 @@ function calculatePromilles() {
         } else {
             // Ollaan vielä 30 min imeytymisikkunassa — ennakoidaan koko annos imeytynyttä
             const peakElapsedHours = (peakTime - firstDrinkTime) / (1000 * 60 * 60);
-            const bacAtPeak = Math.max(0, totalSessionGrams / (weight * r) - peakElapsedHours * burnRatePerHour);
+            const bacAtPeak = Math.max(0, totalSessionGrams / distributionVolume - peakElapsedHours * burnRatePerHour);
             if (bacAtPeak > 0) {
                 const hoursFromPeakToZero = bacAtPeak / burnRatePerHour;
                 zeroTime = new Date(peakTime.getTime() + hoursFromPeakToZero * 60 * 60 * 1000);
@@ -225,7 +250,7 @@ function calculatePromilles() {
         }
 
         updateUI(currentPromilles, zeroTime, sessionDrinks.length, totalSessionGrams);
-        renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromilles, zeroTime);
+        renderBacChart(sessionDrinks, distributionVolume, burnRatePerHour, currentPromilles, zeroTime);
         if (statsOpen) renderStatistics();
     });
 }
@@ -306,6 +331,8 @@ document.getElementById('btn-save').onclick = async function() {
     const abv    = parseFloat(selectAbv.value);
     const volume = parseFloat(document.getElementById('input-volume').value);
     const weight = parseFloat(document.getElementById('input-weight').value) || 80;
+    const height = parseFloat(document.getElementById('input-height').value) || 178;
+    const age    = parseInt(document.getElementById('input-age').value, 10) || 35;
     const gender = document.getElementById('select-gender').value;
 
     if (!volume || volume <= 0) return alert("Syötä määrä!");
@@ -330,7 +357,7 @@ document.getElementById('btn-save').onclick = async function() {
     await dbWrite('drinks_log', drinkRecord);
 
     // Profiili ja viimeisin syöte — ei tarvitse odottaa
-    dbWrite('settings', { key: 'user_profile', weight, gender });
+    dbWrite('settings', { key: 'user_profile', weight, height, age, gender });
     dbWrite('settings', { key: 'last_input', drink_type: activeType, abv, volume_ml: volume });
 
     // Nollataan kellonaikovalinta tallennuksen jälkeen
@@ -362,13 +389,17 @@ document.getElementById('btn-add-custom').onclick = function() {
 };
 
 // --- PROFIILIN TALLENNUS ---
-document.getElementById('input-weight').onchange = saveProfile;
+document.getElementById('input-weight').onchange  = saveProfile;
+document.getElementById('input-height').onchange  = saveProfile;
+document.getElementById('input-age').onchange     = saveProfile;
 document.getElementById('select-gender').onchange = saveProfile;
 
 function saveProfile() {
     const weight = parseFloat(document.getElementById('input-weight').value) || 80;
+    const height = parseFloat(document.getElementById('input-height').value) || 178;
+    const age    = parseInt(document.getElementById('input-age').value, 10) || 35;
     const gender = document.getElementById('select-gender').value;
-    dbWrite('settings', { key: 'user_profile', weight, gender });
+    dbWrite('settings', { key: 'user_profile', weight, height, age, gender });
     calculatePromilles();
 }
 
@@ -463,7 +494,7 @@ async function renderStatistics() {
 }
 
 // --- PROMILLEKUVAAJA ---
-function renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromilles, zeroTime) {
+function renderBacChart(sessionDrinks, distributionVolume, burnRatePerHour, currentPromilles, zeroTime) {
     const canvas       = document.getElementById('bac-chart');
     const chartSection = document.getElementById('chart-section');
     if (!canvas || !chartSection) return;
@@ -491,7 +522,7 @@ function renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromil
             }
         });
         const elapsedHours = (t - firstDrinkTime) / (1000 * 60 * 60);
-        return Math.max(0, absorbed / (weight * r) - elapsedHours * burnRatePerHour);
+        return Math.max(0, absorbed / distributionVolume - elapsedHours * burnRatePerHour);
     }
 
     // Generoi datapisteet 5 min välein ensimmäisestä juomasta → nollahetkeen
@@ -672,7 +703,9 @@ initDB().then(async () => {
     // Ladataan tallennettu profiili
     const profile = await dbGet('settings', 'user_profile');
     if (profile) {
-        document.getElementById('input-weight').value = profile.weight;
+        document.getElementById('input-weight').value  = profile.weight;
+        document.getElementById('input-height').value  = profile.height || 178;
+        document.getElementById('input-age').value     = profile.age || 35;
         document.getElementById('select-gender').value = profile.gender;
     }
 
