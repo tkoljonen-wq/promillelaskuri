@@ -202,15 +202,30 @@ function calculatePromilles() {
         let currentPromilles = theoreticalPromilles - (totalElapsedHours * burnRatePerHour);
         if (currentPromilles < 0) currentPromilles = 0;
 
-        // Arvioidaan milloin promillet ovat nollassa
+        // Arvioidaan milloin promillet ovat nollassa.
+        // Otetaan huomioon, että koko annos imeytyy 30 min kuluessa kirjaamisesta,
+        // joten arvio lasketaan aina huipputason kautta — ei pelkästä nykyisestä tasosta.
+        const peakTime = new Date(lastDrinkTime.getTime() + 30 * 60 * 1000);
         let zeroTime = null;
-        if (currentPromilles > 0) {
-            const hoursToBurn = currentPromilles / burnRatePerHour;
-            zeroTime = new Date(now.getTime() + hoursToBurn * 60 * 60 * 1000);
+
+        if (now >= peakTime) {
+            // Imeytyminen ohi — laske suoraan nykyisestä tasosta
+            if (currentPromilles > 0) {
+                const hoursToBurn = currentPromilles / burnRatePerHour;
+                zeroTime = new Date(now.getTime() + hoursToBurn * 60 * 60 * 1000);
+            }
+        } else {
+            // Ollaan vielä 30 min imeytymisikkunassa — ennakoidaan koko annos imeytynyttä
+            const peakElapsedHours = (peakTime - firstDrinkTime) / (1000 * 60 * 60);
+            const bacAtPeak = Math.max(0, totalSessionGrams / (weight * r) - peakElapsedHours * burnRatePerHour);
+            if (bacAtPeak > 0) {
+                const hoursFromPeakToZero = bacAtPeak / burnRatePerHour;
+                zeroTime = new Date(peakTime.getTime() + hoursFromPeakToZero * 60 * 60 * 1000);
+            }
         }
 
         updateUI(currentPromilles, zeroTime, sessionDrinks.length, totalSessionGrams);
-        renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromilles);
+        renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromilles, zeroTime);
         if (statsOpen) renderStatistics();
     });
 }
@@ -230,7 +245,7 @@ function updateUI(promilles, zeroTime, count, grams) {
         display.className = "text-6xl font-black my-3 text-rose-500 transition-colors duration-500";
     }
 
-    if (zeroTime && promilles > 0) {
+    if (zeroTime) {
         const timeString = zeroTime.toLocaleTimeString('fi-FI', { hour: '2-digit', minute: '2-digit' });
         const msRemaining   = zeroTime - new Date();
         const totalMinutes  = Math.ceil(msRemaining / (1000 * 60));
@@ -448,12 +463,12 @@ async function renderStatistics() {
 }
 
 // --- PROMILLEKUVAAJA ---
-function renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromilles) {
+function renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromilles, zeroTime) {
     const canvas       = document.getElementById('bac-chart');
     const chartSection = document.getElementById('chart-section');
     if (!canvas || !chartSection) return;
 
-    if (!sessionDrinks || sessionDrinks.length === 0 || currentPromilles <= 0) {
+    if (!sessionDrinks || sessionDrinks.length === 0 || !zeroTime) {
         chartSection.classList.add('hidden');
         return;
     }
@@ -462,8 +477,6 @@ function renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromil
 
     const now            = new Date();
     const firstDrinkTime = new Date(sessionDrinks[0].timestamp);
-    const hoursToBurn    = currentPromilles / burnRatePerHour;
-    const zeroTime       = new Date(now.getTime() + hoursToBurn * 60 * 60 * 1000);
 
     // Laske BAC ajanhetkellä t
     function bacAt(t) {
