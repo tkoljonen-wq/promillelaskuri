@@ -222,11 +222,11 @@ async function deleteCustomType(typeId) {
 
 // --- LASKENTALOGIIKKA (WATSON-WIDMARK + 30 MIN IMEYTYMISAIKA) ---
 function calculatePromilles() {
-    const weight = parseFloat(document.getElementById('input-weight').value) || 80;
-    const height = parseFloat(document.getElementById('input-height').value) || 178;
-    const age    = parseInt(document.getElementById('input-age').value, 10) || 35;
-    const gender = document.getElementById('select-gender').value;
-    const burnRatePerHour = 0.15; // Promilleä/tunti, Widmark-vakio
+    const weight        = parseFloat(document.getElementById('input-weight').value) || 80;
+    const height        = parseFloat(document.getElementById('input-height').value) || 178;
+    const age           = parseInt(document.getElementById('input-age').value, 10) || 35;
+    const gender        = document.getElementById('select-gender').value;
+    const burnRatePerHour = parseFloat(document.getElementById('input-burn-rate').value) || 0.15;
 
     const distributionVolume = calculateDistributionVolume(weight, height, age, gender);
 
@@ -461,17 +461,23 @@ document.getElementById('btn-add-custom').onclick = function() {
 };
 
 // --- PROFIILIN TALLENNUS ---
-document.getElementById('input-weight').onchange  = saveProfile;
-document.getElementById('input-height').onchange  = saveProfile;
-document.getElementById('input-age').onchange     = saveProfile;
-document.getElementById('select-gender').onchange = saveProfile;
+document.getElementById('input-weight').onchange    = saveProfile;
+document.getElementById('input-height').onchange    = saveProfile;
+document.getElementById('input-age').onchange       = saveProfile;
+document.getElementById('select-gender').onchange   = saveProfile;
+document.getElementById('input-burn-rate').oninput  = function() {
+    const v = parseFloat(this.value).toFixed(2);
+    document.getElementById('burn-rate-value').textContent = v + ' ‰/h';
+    saveProfile();
+};
 
 function saveProfile() {
-    const weight = parseFloat(document.getElementById('input-weight').value) || 80;
-    const height = parseFloat(document.getElementById('input-height').value) || 178;
-    const age    = parseInt(document.getElementById('input-age').value, 10) || 35;
-    const gender = document.getElementById('select-gender').value;
-    dbWrite('settings', { key: 'user_profile', weight, height, age, gender });
+    const weight    = parseFloat(document.getElementById('input-weight').value) || 80;
+    const height    = parseFloat(document.getElementById('input-height').value) || 178;
+    const age       = parseInt(document.getElementById('input-age').value, 10) || 35;
+    const gender    = document.getElementById('select-gender').value;
+    const burnRate  = parseFloat(document.getElementById('input-burn-rate').value) || 0.15;
+    dbWrite('settings', { key: 'user_profile', weight, height, age, gender, burnRate });
     calculatePromilles();
 }
 
@@ -779,6 +785,9 @@ initDB().then(async () => {
         document.getElementById('input-height').value  = profile.height || 178;
         document.getElementById('input-age').value     = profile.age || 35;
         document.getElementById('select-gender').value = profile.gender;
+        const burnRate = profile.burnRate || 0.15;
+        document.getElementById('input-burn-rate').value    = burnRate;
+        document.getElementById('burn-rate-value').textContent = burnRate.toFixed(2) + ' ‰/h';
     }
 
     // Ladataan juomalajikohtaiset alkoholiprosentit
