@@ -142,6 +142,7 @@ function calculatePromilles() {
     dbGetAll('drinks_log').then(logs => {
         if (logs.length === 0) {
             updateUI(0, null, 0, 0);
+            renderBacChart([], weight, r, burnRatePerHour, 0);
             if (statsOpen) renderStatistics();
             return;
         }
@@ -155,6 +156,7 @@ function calculatePromilles() {
         // 24 tunnin nollaussääntö viimeisestä juomasta
         if ((now - lastDrinkTime) / (1000 * 60 * 60) >= 24) {
             updateUI(0, null, 0, 0);
+            renderBacChart([], weight, r, burnRatePerHour, 0);
             if (statsOpen) renderStatistics();
             return;
         }
@@ -208,6 +210,7 @@ function calculatePromilles() {
         }
 
         updateUI(currentPromilles, zeroTime, sessionDrinks.length, totalSessionGrams);
+        renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromilles);
         if (statsOpen) renderStatistics();
     });
 }
@@ -442,6 +445,213 @@ async function renderStatistics() {
 
     html += '</div>';
     statsList.innerHTML = html;
+}
+
+// --- PROMILLEKUVAAJA ---
+function renderBacChart(sessionDrinks, weight, r, burnRatePerHour, currentPromilles) {
+    const canvas       = document.getElementById('bac-chart');
+    const chartSection = document.getElementById('chart-section');
+    if (!canvas || !chartSection) return;
+
+    if (!sessionDrinks || sessionDrinks.length === 0 || currentPromilles <= 0) {
+        chartSection.classList.add('hidden');
+        return;
+    }
+
+    chartSection.classList.remove('hidden');
+
+    const now            = new Date();
+    const firstDrinkTime = new Date(sessionDrinks[0].timestamp);
+    const hoursToBurn    = currentPromilles / burnRatePerHour;
+    const zeroTime       = new Date(now.getTime() + hoursToBurn * 60 * 60 * 1000);
+
+    // Laske BAC ajanhetkellä t
+    function bacAt(t) {
+        let absorbed = 0;
+        sessionDrinks.forEach(drink => {
+            const drinkTime      = new Date(drink.timestamp);
+            const elapsedMinutes = (t - drinkTime) / (1000 * 60);
+            if (elapsedMinutes > 0) {
+                absorbed += elapsedMinutes >= 30
+                    ? drink.alcohol_grams
+                    : drink.alcohol_grams * (elapsedMinutes / 30);
+            }
+        });
+        const elapsedHours = (t - firstDrinkTime) / (1000 * 60 * 60);
+        return Math.max(0, absorbed / (weight * r) - elapsedHours * burnRatePerHour);
+    }
+
+    // Generoi datapisteet 5 min välein ensimmäisestä juomasta → nollahetkeen
+    const step       = 5 * 60 * 1000;
+    const chartStart = firstDrinkTime.getTime();
+    const chartEnd   = zeroTime.getTime() + step;
+    const points     = [];
+    for (let t = chartStart; t <= chartEnd; t += step) {
+        points.push({ ms: t, bac: bacAt(new Date(t)) });
+    }
+    // Varmista "nyt"-piste on mukana
+    const nowMs  = now.getTime();
+    const nowBac = bacAt(now);
+    let inserted = false;
+    for (let i = 0; i < points.length - 1; i++) {
+        if (points[i].ms <= nowMs && points[i + 1].ms > nowMs) {
+            points.splice(i + 1, 0, { ms: nowMs, bac: nowBac });
+            inserted = true;
+            break;
+        }
+    }
+    if (!inserted) {
+        points.push({ ms: nowMs, bac: nowBac });
+        points.sort((a, b) => a.ms - b.ms);
+    }
+
+    // Canvas-koko (HiDPI-tuki)
+    const dpr          = window.devicePixelRatio || 1;
+    const displayW     = canvas.offsetWidth || (chartSection.clientWidth - 32) || (window.innerWidth - 72);
+    const displayH     = 150;
+    canvas.width       = Math.round(displayW * dpr);
+    canvas.height      = Math.round(displayH * dpr);
+    const ctx          = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    const pad    = { top: 14, right: 14, bottom: 26, left: 38 };
+    const plotW  = displayW - pad.left - pad.right;
+    const plotH  = displayH - pad.top  - pad.bottom;
+    const maxBac = Math.max(...points.map(p => p.bac), 0.1);
+    const yMax   = Math.max(Math.ceil(maxBac * 10) / 10 + 0.1, 0.3);
+
+    const xOf = ms  => pad.left + (ms  - chartStart) / (chartEnd - chartStart) * plotW;
+    const yOf = bac => pad.top  + plotH - (bac / yMax) * plotH;
+
+    ctx.clearRect(0, 0, displayW, displayH);
+
+    // --- Y-viivat ja -merkinnät ---
+    const yStep = maxBac < 0.25 ? 0.1 : 0.5;
+    ctx.font         = '9px sans-serif';
+    ctx.textAlign    = 'right';
+    ctx.textBaseline = 'middle';
+    for (let v = 0; v <= yMax + 0.001; v = Math.round((v + yStep) * 100) / 100) {
+        const y = yOf(v);
+        if (y < pad.top - 4 || y > pad.top + plotH + 4) continue;
+        ctx.strokeStyle = 'rgba(148,163,184,0.1)';
+        ctx.lineWidth   = 1;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(pad.left + plotW, y);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(148,163,184,0.5)';
+        ctx.fillText(v.toFixed(1), pad.left - 5, y);
+    }
+
+    // 0,5 ‰ -raja katkoviivana
+    if (yMax > 0.5) {
+        const y05 = yOf(0.5);
+        ctx.strokeStyle = 'rgba(251,191,36,0.18)';
+        ctx.setLineDash([3, 5]);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y05);
+        ctx.lineTo(pad.left + plotW, y05);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // --- X-akseli: tuntimerkit ---
+    const spanH  = (chartEnd - chartStart) / (1000 * 60 * 60);
+    const hStep  = spanH <= 3 ? 0.5 : spanH <= 6 ? 1 : spanH <= 12 ? 2 : 3;
+    const hStepMs = hStep * 60 * 60 * 1000;
+    const tickOrigin = Math.ceil(chartStart / hStepMs) * hStepMs;
+    ctx.fillStyle    = 'rgba(148,163,184,0.45)';
+    ctx.font         = '9px sans-serif';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'alphabetic';
+    for (let t = tickOrigin; t <= chartEnd; t += hStepMs) {
+        const x = xOf(t);
+        if (x < pad.left - 2 || x > pad.left + plotW + 2) continue;
+        ctx.strokeStyle = 'rgba(148,163,184,0.08)';
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, pad.top);
+        ctx.lineTo(x, pad.top + plotH + 3);
+        ctx.stroke();
+        const label = new Date(t).toLocaleTimeString('fi-FI', { hour: '2-digit', minute: '2-digit' });
+        ctx.fillText(label, x, displayH - 3);
+    }
+
+    // --- Käyrä: menneisyys (kiinteä) ---
+    const pastPts   = points.filter(p => p.ms <= nowMs);
+    const futurePts = points.filter(p => p.ms >= nowMs);
+    const lineColor = currentPromilles > 0.5 ? '#f43f5e' : '#f59e0b';
+
+    if (pastPts.length >= 2) {
+        // Täyttö
+        ctx.beginPath();
+        pastPts.forEach((p, i) => {
+            const x = xOf(p.ms);
+            const y = yOf(p.bac);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.lineTo(xOf(pastPts[pastPts.length - 1].ms), yOf(0));
+        ctx.lineTo(xOf(pastPts[0].ms), yOf(0));
+        ctx.closePath();
+        const fg = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+        fg.addColorStop(0, currentPromilles > 0.5 ? 'rgba(244,63,94,0.28)' : 'rgba(245,158,11,0.22)');
+        fg.addColorStop(1, 'rgba(245,158,11,0.02)');
+        ctx.fillStyle = fg;
+        ctx.fill();
+        // Viiva
+        ctx.beginPath();
+        pastPts.forEach((p, i) => {
+            const x = xOf(p.ms);
+            const y = yOf(p.bac);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth   = 2.5;
+        ctx.lineJoin    = 'round';
+        ctx.lineCap     = 'round';
+        ctx.setLineDash([]);
+        ctx.stroke();
+    }
+
+    // --- Käyrä: tulevaisuus (katkoviiva) ---
+    if (futurePts.length >= 2) {
+        ctx.beginPath();
+        futurePts.forEach((p, i) => {
+            const x = xOf(p.ms);
+            const y = yOf(p.bac);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = 'rgba(148,163,184,0.4)';
+        ctx.lineWidth   = 1.5;
+        ctx.lineJoin    = 'round';
+        ctx.setLineDash([5, 5]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // --- "Nyt"-piste ---
+    const nowX = xOf(nowMs);
+    const nowY = yOf(nowBac);
+    // Pystyviiva
+    ctx.strokeStyle = 'rgba(251,191,36,0.28)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.moveTo(nowX, pad.top);
+    ctx.lineTo(nowX, pad.top + plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Ympyrä
+    ctx.fillStyle   = lineColor;
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.arc(nowX, nowY, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
 }
 
 // --- SOVELLUKSEN KÄYNNISTYS ---
