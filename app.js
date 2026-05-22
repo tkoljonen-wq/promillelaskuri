@@ -220,6 +220,51 @@ async function deleteCustomType(typeId) {
     renderDrinkTypes();
 }
 
+// --- KORJATTU BAC-LASKENTA ---
+// Laskee BAC ajanhetkellä targetMs käyttäen paloittain lineaarista segmenttimallia.
+// Huomioi oikein, että promillet eivät voi alittaa nollaa: jos palaminen ylittää
+// imeytyneen alkoholin, BAC pysyy nollassa eikä kerry "palaamisvelkaa" seuraaviin
+// juomiin. Tämä korjaa bugin, jossa uusi juoma ei nosta promilleja nollan jälkeen.
+function computeBAC(targetMs, sessionDrinks, distributionVolume, burnRatePerHour) {
+    if (!sessionDrinks || sessionDrinks.length === 0) return 0;
+    const drinks = [...sessionDrinks].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const startMs = new Date(drinks[0].timestamp).getTime();
+    if (targetMs <= startMs) return 0;
+
+    // Avainhetket: jokaisen juoman aloitus ja imeytymisen päättyminen (+30 min)
+    const keySet = new Set([startMs, targetMs]);
+    drinks.forEach(d => {
+        const t = new Date(d.timestamp).getTime();
+        keySet.add(t);
+        keySet.add(t + 30 * 60 * 1000);
+    });
+    const timeline = [...keySet]
+        .filter(t => t >= startMs && t <= targetMs)
+        .sort((a, b) => a - b);
+
+    let bac = 0;
+    for (let i = 0; i < timeline.length - 1; i++) {
+        const t0 = timeline[i];
+        const t1 = timeline[i + 1];
+        const dtHours = (t1 - t0) / (1000 * 60 * 60);
+
+        // Imeytymisvauhti tässä segmentissä (‰/h): mukaan vain juomat jotka
+        // imeytyy koko segmentin ajan (avainhetket takaavat, ettei osittaisia)
+        let absRate = 0;
+        drinks.forEach(d => {
+            const drinkMs  = new Date(d.timestamp).getTime();
+            const absEndMs = drinkMs + 30 * 60 * 1000;
+            if (drinkMs <= t0 && absEndMs >= t1) {
+                absRate += (d.alcohol_grams / distributionVolume) / (30 / 60);
+            }
+        });
+
+        // Jos nettovaikutus vie BAC:n alle 0, katkaise nollaan (ei velkaa)
+        bac = Math.max(0, bac + (absRate - burnRatePerHour) * dtHours);
+    }
+    return bac;
+}
+
 // --- LASKENTALOGIIKKA (WATSON-WIDMARK + 30 MIN IMEYTYMISAIKA) ---
 function calculatePromilles() {
     const weight        = parseFloat(document.getElementById('input-weight').value) || 80;
@@ -270,45 +315,23 @@ function calculatePromilles() {
 
         const firstDrinkTime = new Date(sessionDrinks[0].timestamp);
 
-        // Lasketaan imeytynyt alkoholi: lineaarinen nousu 0 → 30 min, sen jälkeen täysi
-        let totalAbsorbedGrams = 0;
-        sessionDrinks.forEach(drink => {
-            const drinkTime = new Date(drink.timestamp);
-            const elapsedMinutes = (now - drinkTime) / (1000 * 60);
-
-            if (elapsedMinutes > 0) {
-                if (elapsedMinutes >= 30) {
-                    totalAbsorbedGrams += drink.alcohol_grams;
-                } else {
-                    totalAbsorbedGrams += drink.alcohol_grams * (elapsedMinutes / 30);
-                }
-            }
-        });
-
-        // Watson-Widmark: C = A / V_d, missä V_d = TBW / 0.85
-        let theoreticalPromilles = totalAbsorbedGrams / distributionVolume;
-
-        // Vähennetään palaminen ensimmäisestä juomasta lähtien
-        const totalElapsedHours = (now - firstDrinkTime) / (1000 * 60 * 60);
-        let currentPromilles = theoreticalPromilles - (totalElapsedHours * burnRatePerHour);
-        if (currentPromilles < 0) currentPromilles = 0;
+        // Lasketaan nykyinen BAC segmenttimallilla (ei nollavelkaa juomien välillä)
+        const currentPromilles = computeBAC(now.getTime(), sessionDrinks, distributionVolume, burnRatePerHour);
 
         // Arvioidaan milloin promillet ovat nollassa.
-        // Otetaan huomioon, että koko annos imeytyy 30 min kuluessa kirjaamisesta,
-        // joten arvio lasketaan aina huipputason kautta — ei pelkästä nykyisestä tasosta.
+        // Huipputaso (viimeisin juoma täysin imeytynyt) lasketaan computeBAC:lla.
         const peakTime = new Date(lastDrinkTime.getTime() + 30 * 60 * 1000);
         let zeroTime = null;
 
         if (now >= peakTime) {
-            // Imeytyminen ohi — laske suoraan nykyisestä tasosta
+            // Imeytyminen ohi — ekstrapoloidaan lineaarisesti nykyisestä tasosta
             if (currentPromilles > 0) {
                 const hoursToBurn = currentPromilles / burnRatePerHour;
                 zeroTime = new Date(now.getTime() + hoursToBurn * 60 * 60 * 1000);
             }
         } else {
-            // Ollaan vielä 30 min imeytymisikkunassa — ennakoidaan koko annos imeytynyttä
-            const peakElapsedHours = (peakTime - firstDrinkTime) / (1000 * 60 * 60);
-            const bacAtPeak = Math.max(0, totalSessionGrams / distributionVolume - peakElapsedHours * burnRatePerHour);
+            // Ollaan vielä 30 min imeytymisikkunassa — lasketaan huipputaso ja ekstrapoloidaan
+            const bacAtPeak = computeBAC(peakTime.getTime(), sessionDrinks, distributionVolume, burnRatePerHour);
             if (bacAtPeak > 0) {
                 const hoursFromPeakToZero = bacAtPeak / burnRatePerHour;
                 zeroTime = new Date(peakTime.getTime() + hoursFromPeakToZero * 60 * 60 * 1000);
@@ -587,20 +610,9 @@ function renderBacChart(sessionDrinks, distributionVolume, burnRatePerHour, curr
     const now            = new Date();
     const firstDrinkTime = new Date(sessionDrinks[0].timestamp);
 
-    // Laske BAC ajanhetkellä t
+    // Laske BAC ajanhetkellä t käyttäen korjattua segmenttilaskentaa (ei nollavelkaa)
     function bacAt(t) {
-        let absorbed = 0;
-        sessionDrinks.forEach(drink => {
-            const drinkTime      = new Date(drink.timestamp);
-            const elapsedMinutes = (t - drinkTime) / (1000 * 60);
-            if (elapsedMinutes > 0) {
-                absorbed += elapsedMinutes >= 30
-                    ? drink.alcohol_grams
-                    : drink.alcohol_grams * (elapsedMinutes / 30);
-            }
-        });
-        const elapsedHours = (t - firstDrinkTime) / (1000 * 60 * 60);
-        return Math.max(0, absorbed / distributionVolume - elapsedHours * burnRatePerHour);
+        return computeBAC(t.getTime(), sessionDrinks, distributionVolume, burnRatePerHour);
     }
 
     // Generoi datapisteet 5 min välein ensimmäisestä juomasta → nollahetkeen
