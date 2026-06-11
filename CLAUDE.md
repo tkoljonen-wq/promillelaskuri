@@ -30,14 +30,17 @@ Koko sovellus koostuu kolmesta tiedostosta:
 
 Kaikki DB-funktiot (`dbWrite`, `dbGet`, `dbGetAll`, `dbClearStore`, `dbDelete`) palauttavat Promisen. `dbWrite` pitää awaitta ennen `calculatePromilles()`-kutsua.
 
-### Laskentalogiikka (`calculatePromilles`)
+### Laskentalogiikka (`calculatePromilles` + `computeBAC`)
 
 1. Haetaan kaikki `drinks_log`-tapahtumat, järjestetään aikajärjestykseen.
 2. **Istuntomääritelmä**: peruutetaan taaksepäin viimeisimmästä juomasta; jos juomien välillä ≥ 24 h tauko, katkaistaan istunto siitä.
 3. **Imeytymismalli**: lineaarinen 0 → 30 min, sen jälkeen täysin imeytynyt.
 4. **Watson-Widmark**: `C = absorbed_grams / V_d`, missä `V_d = TBW / 0.85`. TBW lasketaan Watson-kaavalla (1980): miehillä `2.447 − 0.09516×ikä + 0.1074×pituus + 0.3362×paino`, naisilla `−2.097 + 0.1069×pituus + 0.2466×paino`. Jakautumistilavuus huomioi kehonkoostumuksen — ylipainoisella V_d kasvaa hitaammin kuin kokonaispaino, joten promillearvio on realistisempi.
 5. **Palaminen**: oletuksena `0.15 ‰/h`, käyttäjä voi säätää välillä 0.08–0.25 ‰/h (`input-burn-rate`-liukusäädin käyttäjätiedoissa). Arvo luetaan suoraan kentästä `calculatePromilles()`-funktiossa ja tallennetaan `user_profile`-asetukseen. ‰/h-malli on perusteltu: gramma- ja tilavuusskaala kasvavat yhdessä, joten normaalipaino-referenssissä 0.15 ‰/h ≈ 0.10 g/kg/h. Älä vaihda g/kg/h-malliin — se loisi ristiriidan Watson-V_d:n kanssa ja antaisi ylipainoiselle virheellisesti nopeamman clearance-arvion.
-6. Promillet päivitetään automaattisesti 10 sekunnin välein (`setInterval`).
+6. **`computeBAC(targetMs, sessionDrinks, V_d, burnRate)`** — varsinainen BAC-laskenta. Käyttää paloittain lineaarista segmenttimallia: aikajana jaetaan avainhetkiin (jokaisen juoman aloitus ja +30 min) ja BAC lasketaan segmentti kerrallaan. **BAC katkaistaan nollaan joka segmentissä** — "palaamisvelkaa" ei synny. Tämä on kriittistä: jos käyttäjä juo, promillet laskevat 0:aan ja alle 24 h myöhemmin juo uudelleen, uusi juoma nostaa promilleja oikein. Älä korvaa tätä yksinkertaisella `totalAbsorbed/V_d − totalElapsedHours×burnRate`-kaavalla — se aiheuttaa bugin jossa uusi juoma ei nosta BAC:ia nollan jälkeen.
+7. Promillet päivitetään automaattisesti 10 sekunnin välein (`setInterval`).
+
+`renderBacChart`:n sisäinen `bacAt(t)`-funktio kutsuu samaa `computeBAC`:ia — älä tee siitä erillistä toteutusta.
 
 ### PWA-vaatimukset
 

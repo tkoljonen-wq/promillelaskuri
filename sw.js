@@ -1,4 +1,4 @@
-const cacheName = 'alkolaskuri-v2';
+const cacheName = 'alkolaskuri-v3';
 const assets = [
   './',
   './index.html',
@@ -29,14 +29,28 @@ self.addEventListener('activate', e => {
 
 // Network First -strategia: haetaan aina ensin verkosta, välimuisti fallbackina
 self.addEventListener('fetch', e => {
+  if (e.request.method !== 'GET') return;
   e.respondWith(
     fetch(e.request)
       .then(response => {
-        // Tallennetaan tuore vastaus välimuistiin offline-käyttöä varten
-        const clone = response.clone();
-        caches.open(cacheName).then(cache => cache.put(e.request, clone));
+        // Tallennetaan vain onnistuneet vastaukset — virhesivu (esim. 404/500)
+        // ei saa korvata toimivaa välimuistiversiota
+        if (response.ok) {
+          const clone = response.clone();
+          caches.open(cacheName)
+            .then(cache => cache.put(e.request, clone))
+            .catch(() => {}); // esim. ei-tuettu scheme — ei kaadeta vastausta
+        }
         return response;
       })
-      .catch(() => caches.match(e.request)) // Offline: käytetään välimuistia
+      .catch(() =>
+        // Offline: käytetään välimuistia; navigoinnille fallback etusivuun.
+        // respondWith ei saa koskaan saada undefined-arvoa.
+        caches.match(e.request).then(cached =>
+          cached || (e.request.mode === 'navigate'
+            ? caches.match('./index.html')
+            : Response.error())
+        )
+      )
   );
 });

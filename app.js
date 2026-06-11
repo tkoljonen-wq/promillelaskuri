@@ -65,6 +65,21 @@ async function setTypeAbv(typeId, abv) {
     await dbWrite('settings', { key: 'drink_type_abvs', abvs: typeAbvs });
 }
 
+// Lukee numerokentän arvon ja rajaa sen sallitulle välille — käsin kirjoitettu
+// arvo voi ohittaa input-kentän min/max-attribuutit
+function readClampedNumber(id, fallback, min, max) {
+    const v = parseFloat(document.getElementById(id).value);
+    if (!isFinite(v)) return fallback;
+    return Math.min(max, Math.max(min, v));
+}
+
+// Estää HTML-injektion käyttäjän syöttämissä nimissä (esim. oma juomalaji)
+function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
 // Geneeriset DB-operaatiot — kaikki palauttavat Promisen
 function dbWrite(storeName, data) {
     return new Promise((resolve, reject) => {
@@ -213,6 +228,9 @@ async function renderDrinkTypes() {
 async function deleteCustomType(typeId) {
     if (!confirm('Poistetaanko juomalaji?')) return;
     await dbDelete('drink_types', typeId);
+    // Siivotaan lajin tallennettu ABV pois asetuksista
+    delete typeAbvs[typeId];
+    await dbWrite('settings', { key: 'drink_type_abvs', abvs: typeAbvs });
     if (activeType === typeId) {
         activeType = 'beer';
     }
@@ -267,11 +285,11 @@ function computeBAC(targetMs, sessionDrinks, distributionVolume, burnRatePerHour
 
 // --- LASKENTALOGIIKKA (WATSON-WIDMARK + 30 MIN IMEYTYMISAIKA) ---
 function calculatePromilles() {
-    const weight        = parseFloat(document.getElementById('input-weight').value) || 80;
-    const height        = parseFloat(document.getElementById('input-height').value) || 178;
-    const age           = parseInt(document.getElementById('input-age').value, 10) || 35;
+    const weight        = readClampedNumber('input-weight', 80, 30, 250);
+    const height        = readClampedNumber('input-height', 178, 150, 230);
+    const age           = readClampedNumber('input-age', 35, 18, 100);
     const gender        = document.getElementById('select-gender').value;
-    const burnRatePerHour = parseFloat(document.getElementById('input-burn-rate').value) || 0.15;
+    const burnRatePerHour = readClampedNumber('input-burn-rate', 0.15, 0.08, 0.25);
 
     const distributionVolume = calculateDistributionVolume(weight, height, age, gender);
 
@@ -313,8 +331,6 @@ function calculatePromilles() {
             totalSessionGrams += logs[i].alcohol_grams;
         }
 
-        const firstDrinkTime = new Date(sessionDrinks[0].timestamp);
-
         // Lasketaan nykyinen BAC segmenttimallilla (ei nollavelkaa juomien välillä)
         const currentPromilles = computeBAC(now.getTime(), sessionDrinks, distributionVolume, burnRatePerHour);
 
@@ -335,12 +351,29 @@ function calculatePromilles() {
             if (bacAtPeak > 0) {
                 const hoursFromPeakToZero = bacAtPeak / burnRatePerHour;
                 zeroTime = new Date(peakTime.getTime() + hoursFromPeakToZero * 60 * 60 * 1000);
+            } else if (currentPromilles > 0) {
+                // BAC ehtii nollaan jo imeytymisikkunan aikana (pieni juoma, jonka
+                // imeytymisvauhti alittaa palamisnopeuden) — haetaan nollahetki
+                // puolituksella nykyhetken ja huippuhetken väliltä
+                let lo = now.getTime();
+                let hi = peakTime.getTime();
+                for (let i = 0; i < 25; i++) {
+                    const mid = (lo + hi) / 2;
+                    if (computeBAC(mid, sessionDrinks, distributionVolume, burnRatePerHour) > 0) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                zeroTime = new Date(hi);
             }
         }
 
         updateUI(currentPromilles, zeroTime, sessionDrinks.length, totalSessionGrams);
         renderBacChart(sessionDrinks, distributionVolume, burnRatePerHour, currentPromilles, zeroTime);
         if (statsOpen) renderStatistics();
+    }).catch(err => {
+        console.error('Promillelaskenta epäonnistui:', err);
     });
 }
 
@@ -419,10 +452,6 @@ document.getElementById('select-time-ago').onchange = updateTimeResultLabel;
 document.getElementById('btn-save').onclick = async function() {
     const abv    = parseFloat(selectAbv.value);
     const volume = parseFloat(document.getElementById('input-volume').value);
-    const weight = parseFloat(document.getElementById('input-weight').value) || 80;
-    const height = parseFloat(document.getElementById('input-height').value) || 178;
-    const age    = parseInt(document.getElementById('input-age').value, 10) || 35;
-    const gender = document.getElementById('select-gender').value;
 
     if (!volume || volume <= 0) return alert("Syötä määrä!");
 
@@ -448,16 +477,15 @@ document.getElementById('btn-save').onclick = async function() {
     // Tallennetaan tämän juomalajin käytetty alkoholiprosentti muistiin
     await setTypeAbv(activeType, abv.toFixed(1));
 
-    // Profiili ja viimeisin syöte — ei tarvitse odottaa
-    dbWrite('settings', { key: 'user_profile', weight, height, age, gender });
+    // Profiili (saveProfile sisältää myös burnRaten — put korvaa koko tietueen,
+    // joten kaikki kentät pitää kirjoittaa aina) ja viimeisin syöte
+    saveProfile();
     dbWrite('settings', { key: 'last_input', drink_type: activeType, abv, volume_ml: volume });
 
     // Nollataan kellonaikovalinta tallennuksen jälkeen
     if (customTimeOpen) {
         document.getElementById('btn-time-toggle').click();
     }
-
-    calculatePromilles();
 };
 
 // --- ISTUNNON TYHJENNYS ---
@@ -495,11 +523,11 @@ document.getElementById('input-burn-rate').oninput  = function() {
 };
 
 function saveProfile() {
-    const weight    = parseFloat(document.getElementById('input-weight').value) || 80;
-    const height    = parseFloat(document.getElementById('input-height').value) || 178;
-    const age       = parseInt(document.getElementById('input-age').value, 10) || 35;
+    const weight    = readClampedNumber('input-weight', 80, 30, 250);
+    const height    = readClampedNumber('input-height', 178, 150, 230);
+    const age       = readClampedNumber('input-age', 35, 18, 100);
     const gender    = document.getElementById('select-gender').value;
-    const burnRate  = parseFloat(document.getElementById('input-burn-rate').value) || 0.15;
+    const burnRate  = readClampedNumber('input-burn-rate', 0.15, 0.08, 0.25);
     dbWrite('settings', { key: 'user_profile', weight, height, age, gender, burnRate });
     calculatePromilles();
 }
@@ -548,7 +576,7 @@ async function renderStatistics() {
         const key = `${d.drink_type}__${d.abv}`;
         if (!groups[key]) {
             groups[key] = {
-                label:    typeMap[d.drink_type] || d.drink_type,
+                label:    typeMap[d.drink_type] || 'Poistettu juomalaji',
                 abv:      d.abv,
                 total_ml: 0,
                 count:    0
@@ -569,7 +597,7 @@ async function renderStatistics() {
         html += `
         <div class="flex justify-between items-center bg-slate-900/60 rounded-lg px-3 py-2.5">
             <div>
-                <span class="font-semibold text-slate-200">${g.label}</span>
+                <span class="font-semibold text-slate-200">${escapeHtml(g.label)}</span>
                 <span class="text-slate-400 text-xs ml-2">${parseFloat(g.abv).toFixed(1)} %</span>
             </div>
             <div class="text-right">
@@ -793,10 +821,10 @@ initDB().then(async () => {
     // Ladataan tallennettu profiili
     const profile = await dbGet('settings', 'user_profile');
     if (profile) {
-        document.getElementById('input-weight').value  = profile.weight;
+        document.getElementById('input-weight').value  = profile.weight || 80;
         document.getElementById('input-height').value  = profile.height || 178;
         document.getElementById('input-age').value     = profile.age || 35;
-        document.getElementById('select-gender').value = profile.gender;
+        document.getElementById('select-gender').value = profile.gender || 'male';
         const burnRate = profile.burnRate || 0.15;
         document.getElementById('input-burn-rate').value    = burnRate;
         document.getElementById('burn-rate-value').textContent = burnRate.toFixed(2) + ' ‰/h';
@@ -811,7 +839,13 @@ initDB().then(async () => {
     // Ladataan viimeisin syöte oletuksiksi
     const lastInput = await dbGet('settings', 'last_input');
     if (lastInput) {
-        activeType = lastInput.drink_type;
+        // Varmistetaan että tallennettu juomalaji on yhä olemassa
+        // (oma laji on voitu poistaa edellisen käytön jälkeen)
+        const customTypes = await dbGetAll('drink_types');
+        const validIds = new Set([...defaultTypes, ...customTypes].map(t => t.id));
+        if (validIds.has(lastInput.drink_type)) {
+            activeType = lastInput.drink_type;
+        }
         document.getElementById('input-volume').value = lastInput.volume_ml;
     }
 
