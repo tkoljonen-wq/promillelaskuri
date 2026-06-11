@@ -283,6 +283,66 @@ function computeBAC(targetMs, sessionDrinks, distributionVolume, burnRatePerHour
     return bac;
 }
 
+// Etsii aikavälit joina BAC ylittää raja-arvon (‰). Palauttaa listan
+// {startMs, endMs} -olioita aikajärjestyksessä. Käyttää samaa segmenttimallia
+// kuin computeBAC: segmentin sisällä BAC muuttuu lineaarisesti vakiovauhdilla,
+// joten ylityshetket ratkeavat tarkasti ilman näytteistystä.
+function findThresholdIntervals(sessionDrinks, distributionVolume, burnRatePerHour, threshold, endMs) {
+    if (!sessionDrinks || sessionDrinks.length === 0) return [];
+    const drinks = [...sessionDrinks].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const startMs = new Date(drinks[0].timestamp).getTime();
+    if (endMs <= startMs) return [];
+
+    // Avainhetket kuten computeBAC:ssa: juomien aloitukset ja +30 min
+    const keySet = new Set([startMs, endMs]);
+    drinks.forEach(d => {
+        const t = new Date(d.timestamp).getTime();
+        keySet.add(t);
+        keySet.add(t + 30 * 60 * 1000);
+    });
+    const timeline = [...keySet]
+        .filter(t => t >= startMs && t <= endMs)
+        .sort((a, b) => a - b);
+
+    const intervals = [];
+    let bac = 0;
+    let aboveStart = null;
+
+    for (let i = 0; i < timeline.length - 1; i++) {
+        const t0 = timeline[i];
+        const t1 = timeline[i + 1];
+        const dtHours = (t1 - t0) / (1000 * 60 * 60);
+
+        let absRate = 0;
+        drinks.forEach(d => {
+            const drinkMs  = new Date(d.timestamp).getTime();
+            const absEndMs = drinkMs + 30 * 60 * 1000;
+            if (drinkMs <= t0 && absEndMs >= t1) {
+                absRate += (d.alcohol_grams / distributionVolume) / (30 / 60);
+            }
+        });
+
+        const rate   = absRate - burnRatePerHour; // ‰/h, vakio segmentin sisällä
+        const bacEnd = bac + rate * dtHours;
+
+        if (aboveStart === null && bac <= threshold && bacEnd > threshold) {
+            // Ylitys ylöspäin tämän segmentin sisällä (rate > 0, jako turvallinen)
+            aboveStart = t0 + ((threshold - bac) / rate) * 60 * 60 * 1000;
+        } else if (aboveStart !== null && bacEnd < threshold) {
+            // Alitus alaspäin (rate < 0, koska bac >= threshold segmentin alussa)
+            const crossMs = t0 + ((threshold - bac) / rate) * 60 * 60 * 1000;
+            intervals.push({ startMs: aboveStart, endMs: crossMs });
+            aboveStart = null;
+        }
+
+        bac = Math.max(0, bacEnd);
+    }
+    if (aboveStart !== null) {
+        intervals.push({ startMs: aboveStart, endMs });
+    }
+    return intervals;
+}
+
 // --- LASKENTALOGIIKKA (WATSON-WIDMARK + 30 MIN IMEYTYMISAIKA) ---
 function calculatePromilles() {
     const weight        = readClampedNumber('input-weight', 80, 30, 250);
@@ -369,7 +429,16 @@ function calculatePromilles() {
             }
         }
 
-        updateUI(currentPromilles, zeroTime, sessionDrinks.length, totalSessionGrams);
+        // Aikaväli jona promillet ylittävät 0,5 ‰ — näytetään meneillään
+        // oleva tai seuraava tuleva väli (menneitä ei näytetä)
+        let over05Interval = null;
+        if (zeroTime) {
+            const intervals = findThresholdIntervals(
+                sessionDrinks, distributionVolume, burnRatePerHour, 0.5, zeroTime.getTime());
+            over05Interval = intervals.find(iv => iv.endMs > now.getTime()) || null;
+        }
+
+        updateUI(currentPromilles, zeroTime, sessionDrinks.length, totalSessionGrams, over05Interval);
         renderBacChart(sessionDrinks, distributionVolume, burnRatePerHour, currentPromilles, zeroTime);
         if (statsOpen) renderStatistics();
     }).catch(err => {
@@ -377,9 +446,10 @@ function calculatePromilles() {
     });
 }
 
-function updateUI(promilles, zeroTime, count, grams) {
-    const display     = document.getElementById('promille-display');
-    const burnDisplay = document.getElementById('burn-time-display');
+function updateUI(promilles, zeroTime, count, grams, over05Interval) {
+    const display      = document.getElementById('promille-display');
+    const burnDisplay  = document.getElementById('burn-time-display');
+    const limitDisplay = document.getElementById('limit-display');
 
     display.textContent = promilles.toFixed(2) + " ‰";
 
@@ -404,6 +474,15 @@ function updateUI(promilles, zeroTime, count, grams) {
         burnDisplay.textContent = `Alkoholi poltettu arviolta klo ${timeString} (${countdownStr})`;
     } else {
         burnDisplay.textContent = "Keho on puhdas alkoholista.";
+    }
+
+    // Arvioitu aikaväli jona promillet ovat yli 0,5 ‰
+    if (over05Interval) {
+        const fmt = ms => new Date(ms).toLocaleTimeString('fi-FI', { hour: '2-digit', minute: '2-digit' });
+        limitDisplay.textContent = `Yli 0,5 ‰ arviolta klo ${fmt(over05Interval.startMs)} – ${fmt(over05Interval.endMs)}`;
+        limitDisplay.classList.remove('hidden');
+    } else {
+        limitDisplay.classList.add('hidden');
     }
 
     document.getElementById('session-count').textContent = count;
