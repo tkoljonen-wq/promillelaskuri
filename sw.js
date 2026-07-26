@@ -1,4 +1,4 @@
-const cacheName = 'alkolaskuri-v3';
+const cacheName = 'alkolaskuri-v4';
 const assets = [
   './',
   './index.html',
@@ -9,10 +9,14 @@ const assets = [
   './icons/icon-maskable.svg'
 ];
 
-// Asennetaan ja tallennetaan tiedostot välimuistiin
+// Asennetaan ja tallennetaan tiedostot välimuistiin.
+// cache: 'reload' varmistaa, ettei selaimen HTTP-välimuisti syötä vanhoja
+// versioita suoraan uuteen SW-välimuistiin.
 self.addEventListener('install', e => {
   e.waitUntil(
-    caches.open(cacheName).then(cache => cache.addAll(assets))
+    caches.open(cacheName).then(cache =>
+      cache.addAll(assets.map(url => new Request(url, { cache: 'reload' })))
+    )
   );
   self.skipWaiting(); // Uusi SW aktivoituu heti ilman sivun päivitystä
 });
@@ -27,11 +31,16 @@ self.addEventListener('activate', e => {
   self.clients.claim();
 });
 
-// Network First -strategia: haetaan aina ensin verkosta, välimuisti fallbackina
+// Network First -strategia: haetaan aina ensin verkosta, välimuisti fallbackina.
+// Omille tiedostoille cache: 'no-cache' ohittaa selaimen oman HTTP-välimuistin —
+// muuten GitHub Pagesin max-age=600 saisi selaimen tarjoilemaan vanhaa app.js:ää
+// ~10 min julkaisun jälkeen. Ulkoisille (Tailwind CDN) käytetään normaalia
+// välimuistia, jotta jokainen käynnistys ei lataa kirjastoa uudelleen.
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  const sameOrigin = new URL(e.request.url).origin === self.location.origin;
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, sameOrigin ? { cache: 'no-cache' } : undefined)
       .then(response => {
         // Tallennetaan vain onnistuneet vastaukset — virhesivu (esim. 404/500)
         // ei saa korvata toimivaa välimuistiversiota
