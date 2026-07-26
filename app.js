@@ -614,6 +614,24 @@ function saveProfile() {
 // --- TILASTO (viimeiset 24 h) ---
 let statsOpen = false;
 
+// Yksi annos = 12 g puhdasta alkoholia
+const STANDARD_DRINK_GRAMS = 12;
+
+function formatPortions(portions) {
+    return portions.toFixed(1).replace('.', ',');
+}
+
+// Kirjaamisaika: kellonaika, ja "eilen" jos juoma on eri päivältä
+function formatLogTime(timestamp) {
+    const d       = new Date(timestamp);
+    const timeStr = d.toLocaleTimeString('fi-FI', { hour: '2-digit', minute: '2-digit' });
+    const today   = new Date();
+    const sameDay = d.getDate()  === today.getDate() &&
+                    d.getMonth() === today.getMonth() &&
+                    d.getFullYear() === today.getFullYear();
+    return sameDay ? timeStr : `eilen ${timeStr}`;
+}
+
 document.getElementById('btn-stats-toggle').onclick = function() {
     statsOpen = !statsOpen;
     const content = document.getElementById('stats-content');
@@ -649,53 +667,45 @@ async function renderStatistics() {
     const typeMap     = {};
     allTypes.forEach(t => typeMap[t.id] = t.label);
 
-    // Ryhmitellään lajin ja alkoholiprosentin mukaan
-    const groups = {};
-    recent.forEach(d => {
-        const key = `${d.drink_type}__${d.abv}`;
-        if (!groups[key]) {
-            groups[key] = {
-                label:    typeMap[d.drink_type] || 'Poistettu juomalaji',
-                abv:      d.abv,
-                total_ml: 0,
-                count:    0
-            };
-        }
-        groups[key].total_ml += d.volume_ml;
-        groups[key].count++;
-    });
+    // Uusin ensin
+    const sorted = recent.slice().sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
-    // Järjestys: laji aakkosjärjestyksessä, sitten ABV nousevasti
-    const sorted = Object.values(groups).sort((a, b) =>
-        a.label.localeCompare(b.label, 'fi') || a.abv - b.abv
-    );
-
-    let html = '<div class="space-y-2 mt-1">';
-    sorted.forEach(g => {
-        const cl = (g.total_ml / 10).toFixed(1);
+    let html = '<div class="space-y-2 mt-1 text-left">';
+    sorted.forEach(d => {
+        const label    = typeMap[d.drink_type] || 'Poistettu juomalaji';
+        const cl       = (d.volume_ml / 10).toFixed(1);
+        const grams    = d.alcohol_grams.toFixed(1);
+        const portions = formatPortions(d.alcohol_grams / STANDARD_DRINK_GRAMS);
         html += `
         <div class="flex justify-between items-center bg-slate-900/60 rounded-lg px-3 py-2.5">
-            <div>
-                <span class="font-semibold text-slate-200">${escapeHtml(g.label)}</span>
-                <span class="text-slate-400 text-xs ml-2">${parseFloat(g.abv).toFixed(1)} %</span>
+            <div class="min-w-0">
+                <div class="truncate">
+                    <span class="font-semibold text-slate-200">${escapeHtml(label)}</span>
+                    <span class="text-slate-400 text-xs ml-2">${parseFloat(d.abv).toFixed(1)} %</span>
+                </div>
+                <div class="text-slate-500 text-xs mt-0.5">${formatLogTime(d.timestamp)} &middot; ${cl} cl &middot; ${grams} g</div>
             </div>
-            <div class="text-right">
-                <span class="font-bold text-amber-400">${cl} cl</span>
-                <span class="text-slate-500 text-xs ml-1">(${g.count} kpl)</span>
+            <div class="text-right shrink-0 ml-3">
+                <span class="font-bold text-amber-400">${portions}</span>
+                <span class="text-slate-500 text-xs ml-1">annosta</span>
             </div>
         </div>`;
     });
 
     // Yhteenveto
-    const totalCl    = (recent.reduce((s, d) => s + d.volume_ml, 0) / 10).toFixed(1);
-    const totalGrams = recent.reduce((s, d) => s + d.alcohol_grams, 0).toFixed(1);
-    const totalCount = recent.length;
+    const totalMl       = recent.reduce((s, d) => s + d.volume_ml, 0);
+    const totalGramsRaw = recent.reduce((s, d) => s + d.alcohol_grams, 0);
+    const totalCl       = (totalMl / 10).toFixed(1);
+    const totalGrams    = totalGramsRaw.toFixed(1);
+    const totalPortions = formatPortions(totalGramsRaw / STANDARD_DRINK_GRAMS);
+    const totalCount    = recent.length;
 
     html += `
-    <div class="border-t border-slate-700 mt-3 pt-3 flex justify-between items-center">
+    <div class="border-t border-slate-700 mt-3 pt-3 flex justify-between items-center gap-2">
         <span class="text-slate-400 text-xs uppercase tracking-wide">Yhteensä ${totalCount} kpl</span>
-        <span class="text-amber-400 font-bold">${totalCl} cl &middot; ${totalGrams} g</span>
-    </div>`;
+        <span class="text-amber-400 font-bold text-right">${totalCl} cl &middot; ${totalGrams} g &middot; ${totalPortions} annosta</span>
+    </div>
+    <p class="text-slate-500 text-[11px] mt-2 text-center">1 annos = ${STANDARD_DRINK_GRAMS} g puhdasta alkoholia</p>`;
 
     html += '</div>';
     statsList.innerHTML = html;
